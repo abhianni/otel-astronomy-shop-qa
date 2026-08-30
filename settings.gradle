@@ -1,0 +1,3 @@
+rootProject.name = 'otel-astronomy-shop-qa'
+
+include 'automation', 'agentic'

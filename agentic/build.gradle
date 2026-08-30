@@ -1,0 +1,36 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+def jacksonVersion = '2.18.2'
+def junitVersion = '5.11.3'
+
+dependencies {
+    implementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:${junitVersion}"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+application {
+    mainClass = 'qa.triage.cli.TriageCli'
+}
+
+// Lets `cat bundle.json | ./gradlew :agentic:run` pipe stdin through to the CLI;
+// JavaExec doesn't forward the parent process's stdin by default.
+tasks.named('run', JavaExec) {
+    standardInput = System.in
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+}
