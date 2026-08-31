@@ -64,6 +64,24 @@ Each tier either produces a confident-enough `TriageResult` and **short-circuits
 never run), or falls through to the next tier. Tier 4 is the only tier that costs latency/money
 and the only one that can be absent entirely.
 
+### Target cascade (v1 → v3)
+
+**v1 (now):** classify a new failure by escalating cheap → expensive. **Tier 1** maps the
+*current* log to a category via direct pattern match and a hand-tuned confidence (no historical
+lookup). **Tier 2** checks an exact signature cache for a prior **human-confirmed** verdict.
+**Tier 3** retrieves similar labeled failures from the golden file (Jaccard today) and derives a
+confidence from match strength and top-k category agreement. If every tier scores below the
+short-circuit threshold (~0.85), **Tier 4** (optional LLM) proposes a label; **guardrails**
+blend deterministic and model scores and decide auto-label vs escalate.
+
+**v3 (future, §9):** Tier 3 upgrades to **embedding search** over golden + human-reviewed
+cache entries, with similarity-calibrated confidence instead of fixed 0.9/0.6. **Eval** (offline)
+runs the engine against the golden set to measure accuracy; it is not a runtime tier.
+
+**Learning loop:** when a human confirms or overrides a label, that record is written to **Tier 2
+cache** (exact repeats) and appended to the **retrieval corpus** (semantic neighbors). Tier 1
+rules stay fixed; repeat and near-duplicate failures migrate out of Tier 4 over time.
+
 ---
 
 ## 2. Schemas
@@ -176,6 +194,27 @@ matching; it matters most for Tier 4, which is the only tier whose input leaves 
 **Prompt-injection guardrail (Tier 4 only):** log/diff content is framed as data to classify,
 never as instructions — a test's own stdout is attacker- or bug-controllable and must never be
 able to tell the agent what label to assign.
+
+### 4.1 Deterministic confidence (Tiers 1–3) — not ML, not record lookup
+
+Confidence in Tiers 1–3 is **not** a model probability and **Tier 1 does not search existing
+records**. Each tier assigns a policy score in `[0, 1]` meaning *"how much should we trust
+this answer without calling an LLM?"*
+
+| Tier | What drives confidence | Uses existing records? |
+|---|---|---|
+| **Tier 1 — Rules** | Hand-tuned constant per rule, based on signal unambiguity (e.g. `ECONNREFUSED` → 0.95; bare `OutOfMemoryError` → 0.78 because it could be CI runner heap) | **No** — regex/logic on the *current* `FailureBundle` only |
+| **Tier 2 — Cache** | Fixed **0.95** on signature hit — prior human-confirmed verdict for this normalized failure shape | **Yes** — exact hash lookup in `.cache/triage-cache.json` |
+| **Tier 3 — Golden RAG-lite** | Fixed **0.9** if top-k goldens agree on category, else **0.6** if only the best Jaccard match agrees; below similarity threshold → 0.0 | **Yes** — token overlap on `golden/labeled-failures.jsonl` |
+
+Short-circuit threshold is **0.85** everywhere: at or above → auto-label; below → fall through
+(or `escalateToHuman = true` on the tier's provisional result).
+
+Only when Tier 4 runs does hybrid blending apply: `finalScore = 0.6 × best_deterministic + 0.4 ×
+model_confidence` (see `Guardrails.java`). Tiers 1–3 never call an embedding model or LLM.
+
+Constants are **starting guesses** — tune from weekly accuracy / escalation samples once real
+nightly failures flow through the cascade.
 
 ---
 
@@ -335,3 +374,87 @@ entirely against `NoopLlmTier` — no test in this repo may require a live LLM c
 - Tier 4's actual prompt template and model choice — deferred to the CLI implementation, not this
   design doc.
 - Any auto-remediation (auto-quarantine, auto-file, auto-merge) — deliberately excluded, see §3.
+
+---
+
+## 9. Future implementation — semantic retrieval & calibrated confidence
+
+*Not in v1. Documented here so reviewers see the evolution path without mistaking today's
+fixed constants for a finished ML system.*
+
+### 9.1 What stays unchanged
+
+- **Tier 1 hard rules** for obvious shapes (`ECONNREFUSED`, mixed `last5Runs`, etc.) — cheap,
+  explainable, should not be replaced by embeddings.
+- **Tier 2 exact signature cache** — hash hit remains the highest-trust path for repeat failures.
+- **Human gate** — confirm/override still seeds cache; agent never auto-quarantines or merges.
+
+### 9.2 What embeddings would improve (Tier 3 + confidence)
+
+Today Tier 3 uses **Jaccard token overlap** on a small golden file and maps matches to fixed
+scores (0.9 / 0.6). That breaks down when:
+
+- Log wording drifts but semantics match ("connection reset" vs "ECONNREFUSED").
+- The golden corpus grows beyond ~30 rows (manual token overlap gets noisy).
+- We want confidence **derived from similarity**, not a hand-picked constant.
+
+**Proposed month-3 upgrade:** replace (or augment) Jaccard with **embedding search** over a
+combined corpus:
+
+| Source | Indexed text | Purpose |
+|---|---|---|
+| `golden/labeled-failures.jsonl` | `testName + logTail + notes` | Curated ground truth |
+| Tier 2 cache entries | same fields from human-confirmed failures | Learn from production triage, not just hand-authored goldens |
+| Optional: automation failure exports | JUnit XML + log snippet | Auto-grow corpus from real nightlies |
+
+Retrieval flow:
+
+```
+query = embed(normalize(testName + logTail))
+top-k = vector_index.search(query, k=5)
+confidence = map(cosine_similarity, category_agreement)
+```
+
+Example calibration (tune on held-out goldens):
+
+| Signal | Confidence mapping |
+|---|---|
+| Top-1 similarity ≥ 0.85 and top-3 agree on category | 0.90–0.95 (short-circuit) |
+| Top-1 similarity 0.60–0.84 | 0.55–0.75 (suggest, escalate) |
+| Top-1 similarity < 0.60 or category split in top-k | fall through to Tier 4 LLM |
+| Tier 1 rule agrees with top-1 golden category | +0.05 boost (hybrid agreement) |
+
+This replaces fixed `0.9` / `0.6` with **similarity-derived** scores while keeping Tier 1 rules
+as a separate, auditable signal.
+
+### 9.3 Prerequisites before building it
+
+| Prerequisite | Why |
+|---|---|
+| Human confirm → cache loop wired (`triage confirm` CLI or dashboard) | Embeddings over an empty cache teach nothing |
+| ≥50–100 labeled failures (golden + confirmed cache) | Enough to calibrate similarity → confidence and measure regression |
+| Held-out eval set + LLM-as-judge (§5 metrics) | Prove embedding tier beats Jaccard on accuracy, not just "feels smarter" |
+| Cost/latency budget per nightly failure | Embedding API or local model must beat LLM-only on $/classification |
+
+### 9.4 Explicit non-goals for the embedding tier
+
+- **Not** replacing Tier 1 regex — keep deterministic catches for env and flake priors.
+- **Not** a vector DB for the assignment's 8–10 goldens — Jaccard is sufficient at that scale.
+- **Not** auto-healing from nearest neighbor — retrieval informs **classification only**;
+  recommended actions still require human confirmation below the guardrail threshold.
+
+### 9.5 Implementation sketch (when ready)
+
+```
+agentic/
+  retrieval/
+    EmbeddingRetriever.java    # interface: embed + search
+    JaccardRetriever.java      # current Tier 3 (default until corpus grows)
+    CachedEmbeddingIndex.java  # optional: sqlite/pgvector or on-disk annoy index
+  golden/ + .cache/            # both indexed; cache refreshed on human confirm
+```
+
+Feature flag: `TRIAGE_RETRIEVAL=lexical|semantic` — run both in shadow mode on nightly CI,
+compare category agreement vs human before flipping the default.
+
+---
