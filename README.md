@@ -10,7 +10,7 @@ Quality strategy and artifacts for the [OpenTelemetry Demo](https://github.com/o
 | [test-cases/](./test-cases/) | Done (checkout + cart UI, checkout/payment backend) |
 | [automation/](./automation/) | Done — Java/gRPC + HTTP smoke (`./gradlew test`) |
 | [automation-strategy.md](./automation-strategy.md) | Done |
-| [agentic/](./agentic/) | Design + schemas/CLI + Tiers 1-3 (rules, cache, golden retrieval) done — Tier 4 (LLM) + CLI transcript pending |
+| [agentic/AGENT-DESIGN.md](./agentic/AGENT-DESIGN.md) | Design + schemas/CLI + Tiers 1-3 (rules, cache, golden retrieval) done — Tier 4 (LLM) + CLI transcript pending |
 | [REFLECTION.md](./REFLECTION.md) | Attached link |
 
 ## Target system
