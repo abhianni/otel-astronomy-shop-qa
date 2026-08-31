@@ -11,7 +11,7 @@ Quality strategy and artifacts for the [OpenTelemetry Demo](https://github.com/o
 | [automation/](./automation/) | Done — Java/gRPC + HTTP smoke (`./gradlew test`) |
 | [automation-strategy.md](./automation-strategy.md) | Done |
 | [agentic/](./agentic/) | Design + schemas/CLI + Tiers 1-3 (rules, cache, golden retrieval) done — Tier 4 (LLM) + CLI transcript pending |
-| `REFLECTION.md` | Planned |
+| [REFLECTION.md](./REFLECTION.md) | Attached link |
 
 ## Target system
 
